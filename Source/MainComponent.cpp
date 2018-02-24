@@ -4,97 +4,155 @@
 #include "../JuceLibraryCode/JuceHeader.h"
 
 class MainContentComponent   : public AudioAppComponent,
-                               private ChangeListener,
-                               private ButtonListener
+private ChangeListener,
+private ButtonListener,
+private Timer
 {
 public:
     MainContentComponent()
-       : state (Stopped),
-         thumbnailCache (5),                            // [4]
-         thumbnail (512, formatManager, thumbnailCache) // [5]
+    : state (Stopped),
+    thumbnailCache (5),                            // [4]
+    thumbnail (512, formatManager, thumbnailCache) // [5]
     {
         setLookAndFeel (&lookAndFeel);
         
         addAndMakeVisible (&openButton);
         openButton.setButtonText ("Open...");
         openButton.addListener (this);
-
+        
         addAndMakeVisible (&playButton);
         playButton.setButtonText ("Play");
         playButton.addListener (this);
         playButton.setColour (TextButton::buttonColourId, Colours::green);
         playButton.setEnabled (false);
-
+        
         addAndMakeVisible (&stopButton);
         stopButton.setButtonText ("Stop");
         stopButton.addListener (this);
         stopButton.setColour (TextButton::buttonColourId, Colours::red);
         stopButton.setEnabled (false);
-
+        
         setSize (600, 400);
-
+        
+        addAndMakeVisible (levelSlider);
+        levelSlider.setRange(0,100);
+        levelSlider.setTextValueSuffix("vol");
+        levelSlider.setValue(50);
+        //levelSlider.addListener (this);
+        
+        addAndMakeVisible (volumeLabel);
+        volumeLabel.setText("Volume", dontSendNotification);
+        volumeLabel.attachToComponent (&levelSlider, true);
+        
+        levelSlider.setTextBoxStyle (Slider::TextBoxLeft, false, 160, levelSlider.getTextBoxHeight());
+        
         formatManager.registerBasicFormats();
         transportSource.addChangeListener (this);
         thumbnail.addChangeListener (this);            // [6]
-
+        
+        startTimer(40);
         setAudioChannels (2, 2);
     }
-
+    
     ~MainContentComponent()
     {
+        setLookAndFeel(nullptr);
         shutdownAudio();
     }
-
+    
     void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override
     {
         transportSource.prepareToPlay (samplesPerBlockExpected, sampleRate);
     }
-
+    
     void getNextAudioBlock (const AudioSourceChannelInfo& bufferToFill) override
     {
+        AudioIODevice* device = deviceManager.getCurrentAudioDevice();
+        const BigInteger activeInputChannels = device->getActiveInputChannels();
+        const BigInteger activeOutputChannels = device->getActiveOutputChannels();
+        
+        
+        const int maxInputChannels = activeInputChannels.getHighestBit() + 1;
+        const int maxOutputChannels = activeOutputChannels.getHighestBit() + 1;
         if (readerSource == nullptr)
             bufferToFill.clearActiveBufferRegion();
         else
+        {
             transportSource.getNextAudioBlock (bufferToFill);
+            const float level = (float)levelSlider.getValue();
+            
+            
+            for (int channel = 0; channel < maxOutputChannels; ++channel)
+            {
+                if ((! activeOutputChannels[channel]) || maxInputChannels == 0)
+                {
+                    bufferToFill.buffer->clear (channel, bufferToFill.startSample, bufferToFill.numSamples);
+                }
+                else
+                {
+                    const int actualInputChannel = channel % maxInputChannels;
+                    if (!activeInputChannels[channel])
+                    {
+                        bufferToFill.buffer->clear (channel, bufferToFill.startSample, bufferToFill.numSamples);
+                    }
+                    else
+                    {
+                        const float* inBuffer = bufferToFill.buffer->getReadPointer (actualInputChannel,
+                                                                                     bufferToFill.startSample);
+                        float* outBuffer = bufferToFill.buffer->getWritePointer (channel, bufferToFill.startSample);
+                        
+                        for (int sample = 0; sample < bufferToFill.numSamples; ++sample)
+                            //outBuffer[sample] = inBuffer[sample] * random.nextFloat() * level;
+                            outBuffer[sample] = inBuffer[sample] * level;
+                    }
+                }
+            }
+            
+        }
     }
-
+    
     void releaseResources() override
     {
         transportSource.releaseResources();
     }
-
+    
     void paint (Graphics& g) override
     {
         const Rectangle<int> thumbnailBounds (10, 100, getWidth() - 20, getHeight() - 120);
-
+        
         if (thumbnail.getNumChannels() == 0)
             paintIfNoFileLoaded (g, thumbnailBounds);
         else
             paintIfFileLoaded (g, thumbnailBounds);
     }
-
+    
     void resized() override
     {
         openButton.setBounds (10, 10, getWidth() - 20, 20);
         playButton.setBounds (10, 40, getWidth() - 20, 20);
         stopButton.setBounds (10, 70, getWidth() - 20, 20);
+        levelSlider.setBounds (10, 100, getWidth() - 20, 20);
     }
-
+    
     void changeListenerCallback (ChangeBroadcaster* source) override
     {
         if (source == &transportSource) transportSourceChanged();
         if (source == &thumbnail)       thumbnailChanged();
     }
-
+    
     void buttonClicked (Button* button) override
     {
         if (button == &openButton)  openButtonClicked();
         if (button == &playButton)  playButtonClicked();
         if (button == &stopButton)  stopButtonClicked();
     }
-
-
+    
+    
 private:
+    void timerCallback() override{
+        repaint();
+    }
+    
     enum TransportState
     {
         Stopped,
@@ -104,13 +162,13 @@ private:
         Paused,
         Stopping
     };
-
+    
     void changeState (TransportState newState)
     {
         if (state != newState)
         {
             state = newState;
-
+            
             switch (state)
             {
                 case Stopped:
@@ -120,48 +178,48 @@ private:
                     playButton.setEnabled (true);
                     transportSource.setPosition (0.0);
                     break;
-
+                    
                 case Starting:
                     playButton.setEnabled (false);
                     transportSource.start();
                     break;
-
+                    
                 case Playing:
                     playButton.setButtonText("Pause");
                     stopButton.setButtonText("Stop");
                     stopButton.setEnabled (true);
                     break;
-                
+                    
                 case Pausing:
                     transportSource.stop();
                     break;
-                
+                    
                 case Paused:
                     playButton.setButtonText("Resume");
                     stopButton.setButtonText("Return to Zero");
                     break;
-
+                    
                 case Stopping:
                     transportSource.stop();
                     break;
-
+                    
                 default:
                     jassertfalse;
                     break;
             }
         }
     }
-
+    
     void transportSourceChanged()
     {
         changeState (transportSource.isPlaying() ? Playing : Stopped);
     }
-
+    
     void thumbnailChanged()
     {
         repaint();
     }
-
+    
     void paintIfNoFileLoaded (Graphics& g, const Rectangle<int>& thumbnailBounds)
     {
         g.setColour (Colours::darkgrey);
@@ -169,32 +227,34 @@ private:
         g.setColour (Colours::white);
         g.drawFittedText ("No File Loaded", thumbnailBounds, Justification::centred, 1.0f);
     }
-
+    
     void paintIfFileLoaded (Graphics& g, const Rectangle<int>& thumbnailBounds)
     {
+        const double audioLen(thumbnail.getTotalLength());
+        const double audioPos(transportSource.getCurrentPosition());
         g.setColour (Colours::white);
         g.fillRect (thumbnailBounds);
-
+        
         g.setColour (Colours::red);                                     // [8]
-
+        
         thumbnail.drawChannels (g,                                      // [9]
                                 thumbnailBounds,
-                                0.0,                                    // start time
-                                thumbnail.getTotalLength(),             // end time
+                                audioPos,                                    // start time
+                                audioPos+2,             // end time
                                 1.0f);                                  // vertical zoom
     }
-
+    
     void openButtonClicked()
     {
         FileChooser chooser ("Select a Wave file to play...",
                              File::nonexistent,
-                             "*.wav");
-
+                             "*.wav;*.mp3;*.flac");
+        
         if (chooser.browseForFileToOpen())
         {
             File file (chooser.getResult());
             AudioFormatReader* reader = formatManager.createReaderFor (file);
-
+            
             if (reader != nullptr)
             {
                 ScopedPointer<AudioFormatReaderSource> newSource = new AudioFormatReaderSource (reader, true);
@@ -205,29 +265,31 @@ private:
             }
         }
     }
-
+    
     void playButtonClicked()
     {
         changeState (Starting);
     }
-
+    
     void stopButtonClicked()
     {
         changeState (Stopping);
     }
-
+    
     //==========================================================================
     TextButton openButton;
     TextButton playButton;
     TextButton stopButton;
-
+    
+    Label volumeLabel;
+    Slider levelSlider;
     AudioFormatManager formatManager;                    // [3]
     ScopedPointer<AudioFormatReaderSource> readerSource;
     AudioTransportSource transportSource;
     TransportState state;
     AudioThumbnailCache thumbnailCache;                  // [1]
     AudioThumbnail thumbnail;                            // [2]
-
+    
     LookAndFeel_V3 lookAndFeel;
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainContentComponent)
