@@ -30,6 +30,13 @@ public:
         stopButton.addListener (this);
         stopButton.setColour (TextButton::buttonColourId, Colours::red);
         stopButton.setEnabled (false);
+        
+        levelSlider.setRange (0.0, 0.25);
+        levelSlider.setTextBoxStyle (Slider::TextBoxRight, false, 100, 20);
+        levelLabel.setText ("Noise Level", dontSendNotification);
+        
+        addAndMakeVisible (levelSlider);
+        addAndMakeVisible (levelLabel);
 
         setSize (600, 400);
 
@@ -52,11 +59,48 @@ public:
 
     void getNextAudioBlock (const AudioSourceChannelInfo& bufferToFill) override
     {
+        AudioIODevice* device = deviceManager.getCurrentAudioDevice();
+        const BigInteger activeInputChannels = device->getActiveInputChannels(); //pointer to active channel
+        const BigInteger activeOutputChannels = device->getActiveOutputChannels();
+        const int maxInputChannels = activeInputChannels.getHighestBit() + 1;
+        const int maxOutputChannels = activeOutputChannels.getHighestBit() + 1;
+        
+        const float level = (float) levelSlider.getValue();
+        
+        for (int channel = 0; channel < maxOutputChannels; ++channel)
+        {
+            if ((! activeOutputChannels[channel]) || maxInputChannels == 0)
+            {
+                bufferToFill.buffer->clear (channel, bufferToFill.startSample, bufferToFill.numSamples);
+            }
+            else
+            {
+                const int actualInputChannel = channel % maxInputChannels; // [1]
+                
+                if (! activeInputChannels[channel]) // [2]
+                {
+                    bufferToFill.buffer->clear (channel, bufferToFill.startSample, bufferToFill.numSamples);
+                }
+                else // [3]
+                {
+                    const float* inBuffer = bufferToFill.buffer->getReadPointer (actualInputChannel,
+                                                                                 bufferToFill.startSample);
+                    float* outBuffer = bufferToFill.buffer->getWritePointer (channel, bufferToFill.startSample);
+                    
+                    for (int sample = 0; sample < bufferToFill.numSamples; ++sample)
+                        outBuffer[sample] = inBuffer[sample] * random.nextFloat() * level;
+                }
+            }
+        }
+    }
+    /* //simple original
+    void getNextAudioBlock (const AudioSourceChannelInfo& bufferToFill) override
+    {
         if (readerSource == nullptr)
             bufferToFill.clearActiveBufferRegion();
         else
             transportSource.getNextAudioBlock (bufferToFill);
-    }
+    } */
 
     void releaseResources() override
     {
@@ -95,6 +139,7 @@ public:
 
 
 private:
+    Slider levelSlider;
     enum TransportState
     {
         Stopped,
