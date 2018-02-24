@@ -118,6 +118,7 @@ class MainContentComponent   : public AudioAppComponent,
 public ChangeListener,
 public ButtonListener,
 public Slider::Listener
+
 {
 public:
     MainContentComponent()
@@ -147,14 +148,24 @@ public:
         addAndMakeVisible (&thumbnailComp);
         addAndMakeVisible (&positionOverlay);
         
-        
         addAndMakeVisible (levelSlider);
+        levelSlider.setRange(0,100);
+        levelSlider.setTextValueSuffix("vol");
+        levelSlider.setValue(50);
         levelSlider.addListener (this);
+        
+        addAndMakeVisible (volumeLabel);
+        volumeLabel.setText("Volume", dontSendNotification);
+        volumeLabel.attachToComponent (&levelSlider, true);
+        
+        levelSlider.setTextBoxStyle (Slider::TextBoxLeft, false, 160, levelSlider.getTextBoxHeight());
         
         setSize (600, 400);
         
         formatManager.registerBasicFormats();
         transportSource.addChangeListener (this);
+        
+        setAudioChannels (2, 2);
     }
     
     ~MainContentComponent()
@@ -169,42 +180,49 @@ public:
     
     void getNextAudioBlock (const AudioSourceChannelInfo& bufferToFill) override
     {
-        const int numInputChannels = fileBuffer.getNumChannels();
-        const int numOutputChannels = bufferToFill.buffer->getNumChannels();
+        AudioIODevice* device = deviceManager.getCurrentAudioDevice();
+        const BigInteger activeInputChannels = device->getActiveInputChannels();
+        const BigInteger activeOutputChannels = device->getActiveOutputChannels();
         
-        int outputSamplesRemaining = bufferToFill.numSamples;
-        int outputSamplesOffset = bufferToFill.startSample;
         
-        while (outputSamplesRemaining > 0)
+        const int maxInputChannels = activeInputChannels.getHighestBit() + 1;
+        const int maxOutputChannels = activeOutputChannels.getHighestBit() + 1;
+        if (readerSource == nullptr)
+            bufferToFill.clearActiveBufferRegion();
+        else
         {
-            int bufferSamplesRemaining = fileBuffer.getNumSamples() - position;
-            int samplesThisTime = jmin (outputSamplesRemaining, bufferSamplesRemaining);
+            transportSource.getNextAudioBlock (bufferToFill);
+            const float level = (float)levelSlider.getValue();
             
-            for (int channel = 0; channel < numOutputChannels; ++channel)
+            
+            for (int channel = 0; channel < maxOutputChannels; ++channel)
             {
-                bufferToFill.buffer->copyFrom (channel,
-                                               outputSamplesOffset,
-                                               fileBuffer,
-                                               channel % numInputChannels,
-                                               position,
-                                               samplesThisTime);
+                if ((! activeOutputChannels[channel]) || maxInputChannels == 0)
+                {
+                    bufferToFill.buffer->clear (channel, bufferToFill.startSample, bufferToFill.numSamples);
+                }
+                else
+                {
+                    const int actualInputChannel = channel % maxInputChannels;
+                    if (!activeInputChannels[channel])
+                    {
+                        bufferToFill.buffer->clear (channel, bufferToFill.startSample, bufferToFill.numSamples);
+                    }
+                    else
+                    {
+                        const float* inBuffer = bufferToFill.buffer->getReadPointer (actualInputChannel,
+                                                                                     bufferToFill.startSample);
+                        float* outBuffer = bufferToFill.buffer->getWritePointer (channel, bufferToFill.startSample);
+                        
+                        for (int sample = 0; sample < bufferToFill.numSamples; ++sample)
+                            //outBuffer[sample] = inBuffer[sample] * random.nextFloat() * level;
+                            outBuffer[sample] = inBuffer[sample] * level;
+                    }
+                }
             }
-            
-            outputSamplesRemaining -= samplesThisTime;
-            outputSamplesOffset += samplesThisTime;
-            position += samplesThisTime;
-            
-            if (position == fileBuffer.getNumSamples())
-                position = 0;
-        }
-        
-    }
-    
-    void sliderValueChanged (Slider* slider) override
-    {
-        //do something
-    }
 
+        }
+    }
     
     void releaseResources() override
     {
@@ -236,9 +254,16 @@ public:
         if (button == &stopButton)  stopButtonClicked();
     }
     
+    void sliderValueChanged (Slider* slider) override
+    {
+        //make listeners react to changes in slider values
+        levelSlider.setValue(levelSlider.getValue());
+    }
+    
 private:
     Slider levelSlider;
-    Random random;
+    Label volumeLabel;
+    
     enum TransportState
     {
         Stopped,
@@ -291,37 +316,21 @@ private:
     
     void openButtonClicked()
     {
-        shutdownAudio();
-        
-        FileChooser chooser ("Select a Wave file shorter than 2 seconds to play...",
+        FileChooser chooser ("Select a Wave file to play...",
                              File::nonexistent,
                              "*.wav");
         
         if (chooser.browseForFileToOpen())
         {
-            const File file (chooser.getResult());
-            ScopedPointer<AudioFormatReader> reader (formatManager.createReaderFor (file));
+            File file = chooser.getResult();
             
-            if (reader != nullptr)
+            if (AudioFormatReader* reader = formatManager.createReaderFor (file))
             {
-                const double duration = reader->lengthInSamples / reader->sampleRate;
-                
-                if (duration < 900) //limit 15 min
-                {
-                    fileBuffer.setSize (reader->numChannels, reader->lengthInSamples);
-                    reader->read (&fileBuffer,
-                                  0,
-                                  reader->lengthInSamples,
-                                  0,
-                                  true,
-                                  true);
-                    position = 0;
-                    setAudioChannels (0, reader->numChannels);
-                }
-                else
-                {
-                    throw(duration);
-                }
+                ScopedPointer<AudioFormatReaderSource> newSource = new AudioFormatReaderSource (reader, true);
+                transportSource.setSource (newSource, 0, nullptr, reader->sampleRate);
+                playButton.setEnabled (true);
+                thumbnailComp.setFile (file);
+                readerSource = newSource.release();
             }
         }
     }
@@ -340,13 +349,13 @@ private:
     TextButton openButton;
     TextButton playButton;
     TextButton stopButton;
+    //Random random;
     
     AudioFormatManager formatManager;
     ScopedPointer<AudioFormatReaderSource> readerSource;
-    AudioSampleBuffer fileBuffer;
-    int position;
     AudioTransportSource transportSource;
     TransportState state;
+    AudioFormatReader* reader;
     AudioThumbnailCache thumbnailCache;
     SimpleThumbnailComponent thumbnailComp;
     SimplePositionOverlay positionOverlay;
