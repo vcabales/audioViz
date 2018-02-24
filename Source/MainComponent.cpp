@@ -34,6 +34,18 @@ public:
         
         setSize (600, 400);
         
+        addAndMakeVisible (levelSlider);
+        levelSlider.setRange(0,100);
+        levelSlider.setTextValueSuffix("vol");
+        levelSlider.setValue(50);
+        //levelSlider.addListener (this);
+        
+        addAndMakeVisible (volumeLabel);
+        volumeLabel.setText("Volume", dontSendNotification);
+        volumeLabel.attachToComponent (&levelSlider, true);
+        
+        levelSlider.setTextBoxStyle (Slider::TextBoxLeft, false, 160, levelSlider.getTextBoxHeight());
+        
         formatManager.registerBasicFormats();
         transportSource.addChangeListener (this);
         thumbnail.addChangeListener (this);            // [6]
@@ -55,10 +67,48 @@ public:
     
     void getNextAudioBlock (const AudioSourceChannelInfo& bufferToFill) override
     {
+        AudioIODevice* device = deviceManager.getCurrentAudioDevice();
+        const BigInteger activeInputChannels = device->getActiveInputChannels();
+        const BigInteger activeOutputChannels = device->getActiveOutputChannels();
+        
+        
+        const int maxInputChannels = activeInputChannels.getHighestBit() + 1;
+        const int maxOutputChannels = activeOutputChannels.getHighestBit() + 1;
         if (readerSource == nullptr)
             bufferToFill.clearActiveBufferRegion();
         else
+        {
             transportSource.getNextAudioBlock (bufferToFill);
+            const float level = (float)levelSlider.getValue();
+            
+            
+            for (int channel = 0; channel < maxOutputChannels; ++channel)
+            {
+                if ((! activeOutputChannels[channel]) || maxInputChannels == 0)
+                {
+                    bufferToFill.buffer->clear (channel, bufferToFill.startSample, bufferToFill.numSamples);
+                }
+                else
+                {
+                    const int actualInputChannel = channel % maxInputChannels;
+                    if (!activeInputChannels[channel])
+                    {
+                        bufferToFill.buffer->clear (channel, bufferToFill.startSample, bufferToFill.numSamples);
+                    }
+                    else
+                    {
+                        const float* inBuffer = bufferToFill.buffer->getReadPointer (actualInputChannel,
+                                                                                     bufferToFill.startSample);
+                        float* outBuffer = bufferToFill.buffer->getWritePointer (channel, bufferToFill.startSample);
+                        
+                        for (int sample = 0; sample < bufferToFill.numSamples; ++sample)
+                            //outBuffer[sample] = inBuffer[sample] * random.nextFloat() * level;
+                            outBuffer[sample] = inBuffer[sample] * level;
+                    }
+                }
+            }
+            
+        }
     }
     
     void releaseResources() override
@@ -81,6 +131,7 @@ public:
         openButton.setBounds (10, 10, getWidth() - 20, 20);
         playButton.setBounds (10, 40, getWidth() - 20, 20);
         stopButton.setBounds (10, 70, getWidth() - 20, 20);
+        levelSlider.setBounds (10, 100, getWidth() - 20, 20);
     }
     
     void changeListenerCallback (ChangeBroadcaster* source) override
@@ -230,6 +281,8 @@ private:
     TextButton playButton;
     TextButton stopButton;
     
+    Label volumeLabel;
+    Slider levelSlider;
     AudioFormatManager formatManager;                    // [3]
     ScopedPointer<AudioFormatReaderSource> readerSource;
     AudioTransportSource transportSource;
