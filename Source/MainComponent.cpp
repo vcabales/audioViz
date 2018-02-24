@@ -3,129 +3,15 @@
 
 #include "../JuceLibraryCode/JuceHeader.h"
 
-// example implementation of the Exercise 3
-
-class SimpleThumbnailComponent : public Component,
-private ChangeListener
-{
-public:
-    SimpleThumbnailComponent (int sourceSamplesPerThumbnailSample,
-                              AudioFormatManager& formatManager,
-                              AudioThumbnailCache& cache)
-    : thumbnail (sourceSamplesPerThumbnailSample, formatManager, cache)
-    {
-        thumbnail.addChangeListener (this);
-    }
-    
-    void setFile (const File& file)
-    {
-        thumbnail.setSource (new FileInputSource (file));
-    }
-    
-    void paint (Graphics& g) override
-    {
-        if (thumbnail.getNumChannels() == 0)
-            paintIfNoFileLoaded (g);
-        else
-            paintIfFileLoaded (g);
-    }
-    
-    void paintIfNoFileLoaded (Graphics& g)
-    {
-        g.fillAll (Colours::white);
-        g.setColour (Colours::darkgrey);
-        g.drawFittedText ("No File Loaded", getLocalBounds(), Justification::centred, 1.0f);
-    }
-    
-    void paintIfFileLoaded (Graphics& g)
-    {
-        g.fillAll(Colours::white);
-        
-        g.setColour (Colours::red);
-        thumbnail.drawChannels (g, getLocalBounds(), 0.0, thumbnail.getTotalLength(), 1.0f);
-    }
-    
-    void changeListenerCallback (ChangeBroadcaster* source) override
-    {
-        if (source == &thumbnail)
-            thumbnailChanged();
-    }
-    
-private:
-    void thumbnailChanged()
-    {
-        repaint();
-    }
-    
-    AudioThumbnail thumbnail;
-    
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SimpleThumbnailComponent)
-};
-
-//------------------------------------------------------------------------------
-
-class SimplePositionOverlay : public Component,
-private Timer
-{
-public:
-    SimplePositionOverlay (AudioTransportSource& transportSourceToUse)
-    : transportSource (transportSourceToUse)
-    {
-        startTimer (40);
-    }
-    
-    void paint (Graphics& g) override
-    {
-        const double duration = transportSource.getLengthInSeconds();
-        
-        if (duration > 0.0)
-        {
-            const double audioPosition = transportSource.getCurrentPosition();
-            const float drawPosition = (audioPosition / duration) * getWidth();
-            
-            g.setColour (Colours::green);
-            g.drawLine (drawPosition, 0.0f, drawPosition, (float) getHeight(), 2.0f);
-        }
-    }
-    
-    void mouseDown (const MouseEvent& event) override
-    {
-        const double duration = transportSource.getLengthInSeconds();
-        
-        if (duration > 0.0)
-        {
-            const double clickPosition = event.position.x;
-            const double audioPosition = (clickPosition / getWidth()) * duration;
-            
-            transportSource.setPosition (audioPosition);
-        }
-    }
-    
-private:
-    void timerCallback() override
-    {
-        repaint();
-    }
-    
-    AudioTransportSource& transportSource;
-    
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SimplePositionOverlay)
-};
-
-//------------------------------------------------------------------------------
-
 class MainContentComponent   : public AudioAppComponent,
-public ChangeListener,
-public ButtonListener,
-public Slider::Listener
-
+private ChangeListener,
+private ButtonListener
 {
 public:
     MainContentComponent()
     : state (Stopped),
-    thumbnailCache (5),
-    thumbnailComp (512, formatManager, thumbnailCache),
-    positionOverlay (transportSource)
+    thumbnailCache (5),                            // [4]
+    thumbnail (512, formatManager, thumbnailCache) // [5]
     {
         setLookAndFeel (&lookAndFeel);
         
@@ -145,25 +31,23 @@ public:
         stopButton.setColour (TextButton::buttonColourId, Colours::red);
         stopButton.setEnabled (false);
         
-        addAndMakeVisible (&thumbnailComp);
-        addAndMakeVisible (&positionOverlay);
-        
         addAndMakeVisible (levelSlider);
         levelSlider.setRange(0,100);
         levelSlider.setTextValueSuffix("vol");
         levelSlider.setValue(50);
-        levelSlider.addListener (this);
         
         addAndMakeVisible (volumeLabel);
         volumeLabel.setText("Volume", dontSendNotification);
         volumeLabel.attachToComponent (&levelSlider, true);
         
         levelSlider.setTextBoxStyle (Slider::TextBoxLeft, false, 160, levelSlider.getTextBoxHeight());
+
         
         setSize (600, 400);
         
         formatManager.registerBasicFormats();
         transportSource.addChangeListener (this);
+        thumbnail.addChangeListener (this);            // [6]
         
         setAudioChannels (2, 2);
     }
@@ -220,7 +104,7 @@ public:
                     }
                 }
             }
-
+            
         }
     }
     
@@ -229,22 +113,28 @@ public:
         transportSource.releaseResources();
     }
     
+    void paint (Graphics& g) override
+    {
+        const Rectangle<int> thumbnailBounds (10, 100, getWidth() - 20, getHeight() - 120);
+        
+        if (thumbnail.getNumChannels() == 0)
+            paintIfNoFileLoaded (g, thumbnailBounds);
+        else
+            paintIfFileLoaded (g, thumbnailBounds);
+    }
+    
     void resized() override
     {
         openButton.setBounds (10, 10, getWidth() - 20, 20);
         playButton.setBounds (10, 40, getWidth() - 20, 20);
         stopButton.setBounds (10, 70, getWidth() - 20, 20);
         levelSlider.setBounds (10, 100, getWidth() - 20, 20);
-        
-        const Rectangle<int> thumbnailBounds (10, 100, getWidth() - 20, getHeight() - 120);
-        thumbnailComp.setBounds (thumbnailBounds);
-        positionOverlay.setBounds (thumbnailBounds);
     }
     
     void changeListenerCallback (ChangeBroadcaster* source) override
     {
-        if (source == &transportSource)
-            transportSourceChanged();
+        if (source == &transportSource) transportSourceChanged();
+        if (source == &thumbnail)       thumbnailChanged();
     }
     
     void buttonClicked (Button* button) override
@@ -254,21 +144,17 @@ public:
         if (button == &stopButton)  stopButtonClicked();
     }
     
-    void sliderValueChanged (Slider* slider) override
-    {
-        //make listeners react to changes in slider values
-        levelSlider.setValue(levelSlider.getValue());
-    }
     
 private:
     Slider levelSlider;
     Label volumeLabel;
-    
     enum TransportState
     {
         Stopped,
         Starting,
         Playing,
+        Pausing,
+        Paused,
         Stopping
     };
     
@@ -281,6 +167,8 @@ private:
             switch (state)
             {
                 case Stopped:
+                    playButton.setButtonText("Play");
+                    stopButton.setButtonText("Stop");
                     stopButton.setEnabled (false);
                     playButton.setEnabled (true);
                     transportSource.setPosition (0.0);
@@ -292,7 +180,18 @@ private:
                     break;
                     
                 case Playing:
+                    playButton.setButtonText("Pause");
+                    stopButton.setButtonText("Stop");
                     stopButton.setEnabled (true);
+                    break;
+                    
+                case Pausing:
+                    transportSource.stop();
+                    break;
+                    
+                case Paused:
+                    playButton.setButtonText("Resume");
+                    stopButton.setButtonText("Return to Zero");
                     break;
                     
                 case Stopping:
@@ -308,10 +207,34 @@ private:
     
     void transportSourceChanged()
     {
-        if (transportSource.isPlaying())
-            changeState (Playing);
-        else
-            changeState (Stopped);
+        changeState (transportSource.isPlaying() ? Playing : Stopped);
+    }
+    
+    void thumbnailChanged()
+    {
+        repaint();
+    }
+    
+    void paintIfNoFileLoaded (Graphics& g, const Rectangle<int>& thumbnailBounds)
+    {
+        g.setColour (Colours::darkgrey);
+        g.fillRect (thumbnailBounds);
+        g.setColour (Colours::white);
+        g.drawFittedText ("No File Loaded", thumbnailBounds, Justification::centred, 1.0f);
+    }
+    
+    void paintIfFileLoaded (Graphics& g, const Rectangle<int>& thumbnailBounds)
+    {
+        g.setColour (Colours::white);
+        g.fillRect (thumbnailBounds);
+        
+        g.setColour (Colours::red);                                     // [8]
+        
+        thumbnail.drawChannels (g,                                      // [9]
+                                thumbnailBounds,
+                                0.0,                                    // start time
+                                thumbnail.getTotalLength(),             // end time
+                                1.0f);                                  // vertical zoom
     }
     
     void openButtonClicked()
@@ -329,7 +252,6 @@ private:
                 ScopedPointer<AudioFormatReaderSource> newSource = new AudioFormatReaderSource (reader, true);
                 transportSource.setSource (newSource, 0, nullptr, reader->sampleRate);
                 playButton.setEnabled (true);
-                thumbnailComp.setFile (file);
                 readerSource = newSource.release();
             }
         }
@@ -349,16 +271,14 @@ private:
     TextButton openButton;
     TextButton playButton;
     TextButton stopButton;
-    //Random random;
     
-    AudioFormatManager formatManager;
+    AudioFormatManager formatManager;                    // [3]
     ScopedPointer<AudioFormatReaderSource> readerSource;
     AudioTransportSource transportSource;
-    TransportState state;
     AudioFormatReader* reader;
-    AudioThumbnailCache thumbnailCache;
-    SimpleThumbnailComponent thumbnailComp;
-    SimplePositionOverlay positionOverlay;
+    TransportState state;
+    AudioThumbnailCache thumbnailCache;                  // [1]
+    AudioThumbnail thumbnail;                            // [2]
     
     LookAndFeel_V3 lookAndFeel;
     
